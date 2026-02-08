@@ -1,4 +1,11 @@
 ---------------------------------------------------------------------------------------------------
+Version: 1.3.0
+Date: 08.02.2026
+  Bugfixes:
+    - Fixed unrecoverable errors after player death/respawn.
+    - Fixed shortcut icon paths to avoid startup crashes.
+    - Quality system: consume only matching-quality items when reviving ghosts.
+---------------------------------------------------------------------------------------------------
 Version: 1.2.6
 Date: 16.10.2025
   Bugfixes:

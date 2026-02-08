@@ -1,4 +1,4 @@
-https://mods.factorio.com/mod/player-auto-build-2
+https://mods.factorio.com/mod/player-auto-build-3
 
 Automatically builds or removes blueprint / deconstruction / ghosts near the player. It has the same behaviour like you would do yourself mining or removing things. Also supports deconstruction which will mine mineable things to your inventory. Deconsturctions works on everything which is markable.
 

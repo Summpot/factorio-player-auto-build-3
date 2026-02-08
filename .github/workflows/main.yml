@@ -24,7 +24,7 @@ jobs:
       # Mod packen mit korrektem Verzeichnisaufbau
       - name: Pack Factorio Mod
         run: |
-          FOLDER_NAME="player-auto-build-2_${VERSION}"
+          FOLDER_NAME="player-auto-build-3_${VERSION}"
           shopt -s extglob
           mkdir "$FOLDER_NAME"
           mv -- !("$FOLDER_NAME"|.git|.github) "$FOLDER_NAME"
@@ -38,7 +38,7 @@ jobs:
         id: init_upload
         env:
           FACTORIO_MOD_TOKEN: ${{ secrets.FACTORIO_MOD_TOKEN }}
-          MOD_NAME: "player-auto-build-2"
+          MOD_NAME: "player-auto-build-3"
         run: |
           RESPONSE=$(curl -s -X POST \
             -H "Authorization: Bearer $FACTORIO_MOD_TOKEN" \
