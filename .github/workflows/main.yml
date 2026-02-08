@@ -33,6 +33,11 @@ jobs:
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
           shopt -u extglob
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mod
+          path: ${{ env.ZIP_NAME }}
+
       # Initialisiere Upload
       - name: Initialize Upload
         id: init_upload
