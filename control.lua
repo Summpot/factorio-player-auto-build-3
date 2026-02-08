@@ -1,73 +1,77 @@
 local HelperFunctions = {}
 
-local action_queue = {}
+-- NOTE: A queued action may execute after player death/respawn.
+-- Never keep a long-lived reference to LuaInventory; always fetch inventory at execution time.
+-- Also keep queues per-player to avoid executing work for the wrong player.
 
-function add_queue_list(entity, action)
-
-  local index = index_of_in_queue_list(entity)
-  if index >= 0 then return end
-
-  table.insert(action_queue, {entity = entity, action = action})
+local function ensure_storage_tables()
+  storage = storage or {}
+  storage.player_info = storage.player_info or {}
+  storage.action_queue = storage.action_queue or {}
+  storage.action_queue_index = storage.action_queue_index or {}
 end
 
-function remove_queue_list(entity)
-  local index = index_of_in_queue_list(entity)
-  if index >= 0 then
-    table.remove(action_queue, index)
+local function get_entity_queue_key(entity)
+  if not entity or not entity.valid then return nil end
+
+  if entity.unit_number then
+    return tostring(entity.unit_number)
   end
 
+  local surface_index = (entity.surface and entity.surface.valid and entity.surface.index) or -1
+  local pos = entity.position or {x = 0, y = 0}
+  return string.format("%d|%s|%.3f|%.3f", surface_index, tostring(entity.type), pos.x or 0, pos.y or 0)
 end
 
-function contains_queue_list(entity)
-  return index_of_in_queue_list(entity) >= 0
+local function clear_player_queue(player_index)
+  ensure_storage_tables()
+  storage.action_queue[player_index] = {}
+  storage.action_queue_index[player_index] = {}
 end
 
-function index_of_in_queue_list(entity)
-  if not entity or not entity.valid then return -1 end
+local function enqueue_action(player_index, entity, action)
+  ensure_storage_tables()
+  if not entity or not entity.valid then return end
 
-  for index, keyValue in pairs(action_queue) do
-      if keyValue.entity and keyValue.entity.valid then
-        if are_positions_equal(keyValue.entity.position, entity.position) then
-          return index
-        end
-      end
-  end
+  storage.action_queue[player_index] = storage.action_queue[player_index] or {}
+  storage.action_queue_index[player_index] = storage.action_queue_index[player_index] or {}
 
-  return -1
+  local key = get_entity_queue_key(entity)
+  if not key then return end
+  if storage.action_queue_index[player_index][key] then return end
+
+  storage.action_queue_index[player_index][key] = true
+  table.insert(storage.action_queue[player_index], {key = key, entity = entity, action = action})
 end
 
-function are_positions_equal(pos1, pos2)
-  return pos1.x == pos2.x and pos1.y == pos2.y
-end
-
-function enqueue_action(entity, action)
-  if contains_queue_list(entity) then return end
-
-  add_queue_list(entity, action)
-
-end
-
-function dequeue_action_as_table(max_entries)
-
-  if not action_queue then return {} end
+local function dequeue_action_as_table(player_index, max_entries)
+  ensure_storage_tables()
+  local queue = storage.action_queue[player_index]
+  if not queue then return {} end
 
   local listOfActions = {}
+  local removeIndices = {}
 
-  for index, keyValue in pairs(action_queue) do
-
-    local entity = keyValue.entity
-    local action = keyValue.action
-
-    if entity and entity.valid then
-      table.insert(listOfActions, {entity = entity, action = action})
-
-       max_entries = max_entries - 1
-
-      if(max_entries <= 0) then
+  for idx, entry in ipairs(queue) do
+    if entry and entry.entity and entry.entity.valid and entry.action then
+      table.insert(listOfActions, entry)
+      table.insert(removeIndices, idx)
+      max_entries = max_entries - 1
+      if max_entries <= 0 then
         break
-
       end
+    else
+      table.insert(removeIndices, idx)
     end
+  end
+
+  for i = #removeIndices, 1, -1 do
+    local idx = removeIndices[i]
+    local entry = queue[idx]
+    if entry and entry.key and storage.action_queue_index[player_index] then
+      storage.action_queue_index[player_index][entry.key] = nil
+    end
+    table.remove(queue, idx)
   end
 
   return listOfActions
@@ -80,40 +84,39 @@ function get_distance(pos1, pos2)
 end
 
 function try_build_ghost(player, info)
-  local inv = player.get_main_inventory()
-  
   for _, ghost_entity in pairs(info.ghost_entities) do
 
     local skipDistanceCheck = player.character == nil
     -- if no character just ignore range check
     if(skipDistanceCheck or get_distance(player.position, ghost_entity.position) < info.ghost_search_range) then
 
-      enqueue_action(ghost_entity, function()
-        if ghost_entity.valid then
+      local player_index = player.index
+      enqueue_action(player_index, ghost_entity, function()
+        local p = game.get_player(player_index)
+        if not p or not p.valid then return end
+        if not p.is_shortcut_toggled("toggle-player-auto-build") then return end
+        if not ghost_entity or not ghost_entity.valid then return end
 
-          local items = ghost_entity.ghost_prototype.items_to_place_this or {}
+        local inv = p.get_main_inventory()
+        if not inv or not inv.valid then return end
 
-          for _,wanted_stack in pairs(items) do
+        local items = ghost_entity.ghost_prototype.items_to_place_this or {}
 
-            local stack = inv.find_item_stack(wanted_stack.name)
-            if stack then
-              if stack.count >= wanted_stack.count then
-                local collide, entity, request_proxy = ghost_entity.revive{raise_revive=true, return_item_request_proxy=true}
-                if entity then
-                  if stack.health ~= nil and stack.health < 1 and entity.health ~= nil and entity.max_health ~= nil then
-                    entity.health = stack.health * entity.max_health
-                  end
-                end
-
-                if not ghost_entity.valid then -- entity is null if tile placed. So we check if ghost just got removed.
-                  player.remove_item(wanted_stack)
-                end
-                return
+        for _, wanted_stack in pairs(items) do
+          local stack = inv.find_item_stack(wanted_stack.name)
+          if stack and stack.valid_for_read and stack.count >= wanted_stack.count then
+            local collide, entity, request_proxy = ghost_entity.revive{raise_revive = true, return_item_request_proxy = true}
+            if entity then
+              if stack.health ~= nil and stack.health < 1 and entity.health ~= nil and entity.max_health ~= nil then
+                entity.health = stack.health * entity.max_health
               end
             end
 
+            if not ghost_entity.valid then
+              p.remove_item(wanted_stack)
+            end
+            return
           end
-
         end
       end)
 
@@ -130,12 +133,30 @@ function try_to_autodeconstruct(player, deconstructs)
                 if entity.to_be_deconstructed() then
                   
                   if entity.type == "deconstructible-tile-proxy" then
-                    enqueue_action(entity, function() try_mine_tile_if_space(player, entity) end)
+                    local player_index = player.index
+                    enqueue_action(player_index, entity, function()
+                      local p = game.get_player(player_index)
+                      if not p or not p.valid then return end
+                      if not p.is_shortcut_toggled("toggle-player-auto-build") then return end
+                      try_mine_tile_if_space(p, entity)
+                    end)
                   elseif (entity.prototype.mineable_properties and entity.prototype.mineable_properties.minable == true)  then
-                    enqueue_action(entity, function() try_mine_entity_if_space(player, entity) end)
+                    local player_index = player.index
+                    enqueue_action(player_index, entity, function()
+                      local p = game.get_player(player_index)
+                      if not p or not p.valid then return end
+                      if not p.is_shortcut_toggled("toggle-player-auto-build") then return end
+                      try_mine_entity_if_space(p, entity)
+                    end)
                   else
                     if entity.type == "cliff" then
-                      enqueue_action(entity, function() try_remove_and_destruct_entity(player, entity) end)
+                      local player_index = player.index
+                      enqueue_action(player_index, entity, function()
+                        local p = game.get_player(player_index)
+                        if not p or not p.valid then return end
+                        if not p.is_shortcut_toggled("toggle-player-auto-build") then return end
+                        try_remove_and_destruct_entity(p, entity)
+                      end)
                     end
                   end
               end
@@ -201,14 +222,12 @@ function tick_action_queue(player)
     return
   end
 
-  if not action_queue then return end
+  ensure_storage_tables()
 
-  local listOfActions = dequeue_action_as_table(10)
-
-  for index, keyValue in ipairs(listOfActions) do
-    if keyValue and keyValue.entity and keyValue.entity.valid and keyValue.action then
-      remove_queue_list(keyValue.entity)
-      keyValue.action()
+  local listOfActions = dequeue_action_as_table(player.index, 10)
+  for _, entry in ipairs(listOfActions) do
+    if entry and entry.action then
+      entry.action()
     end
   end
 
@@ -232,6 +251,7 @@ function tick_autobuild(player)
   local position = player.position
   local radius = (player.character and (player.character.build_distance + 30)) or 50
 
+  ensure_storage_tables()
   local info = storage.player_info[player.index]
 
   if not info then
@@ -241,9 +261,9 @@ function tick_autobuild(player)
       search_timer = 0,
       ghost_entities = {},
     }
-
-    -- storage.player_info[player.index] = info
   end
+
+  storage.player_info[player.index] = info
 
   info.character_position = position
   info.ghost_search_range = radius
@@ -285,15 +305,32 @@ function toggle_auto_build(player_index)
   local player = game.players[player_index]
   local state = not player.is_shortcut_toggled("toggle-player-auto-build")
   player.set_shortcut_toggled("toggle-player-auto-build", state)
+
+  if not state then
+    clear_player_queue(player_index)
+  end
 end
 
 script.on_init(function()
-  storage = storage or {}
-  storage.player_info = storage.player_info or {}
+  ensure_storage_tables()
 end)
 
 script.on_event(defines.events.on_player_joined_game, function(event)
+  ensure_storage_tables()
   storage.player_info[event.player_index] = nil
+  clear_player_queue(event.player_index)
+end)
+
+script.on_event(defines.events.on_player_died, function(event)
+  ensure_storage_tables()
+  storage.player_info[event.player_index] = nil
+  clear_player_queue(event.player_index)
+end)
+
+script.on_event(defines.events.on_player_respawned, function(event)
+  ensure_storage_tables()
+  storage.player_info[event.player_index] = nil
+  clear_player_queue(event.player_index)
 end)
 
 script.on_event(defines.events.on_game_created_from_scenario , function(event)
