@@ -83,6 +83,71 @@ function get_distance(pos1, pos2)
   return math.sqrt(dx * dx + dy * dy)
 end
 
+local function get_quality_name_from_item_stack(stack)
+  if not stack then return "normal" end
+  local q = stack.quality
+  if q and q.name then
+    return q.name
+  end
+  return "normal"
+end
+
+local function get_quality_name_from_ghost(ghost_entity)
+  if not ghost_entity or not ghost_entity.valid then return "normal" end
+  local q = ghost_entity.quality
+
+  if q == nil then
+    return "normal"
+  end
+  if type(q) == "string" then
+    return q
+  end
+  if type(q) == "table" and q.name then
+    return q.name
+  end
+
+  return "normal"
+end
+
+local function count_items_with_quality(inv, item_name, required_quality)
+  if not inv or not inv.valid then return 0 end
+  local required = required_quality or "normal"
+
+  local count = 0
+  for i = 1, #inv do
+    local stack = inv[i]
+    if stack and stack.valid_for_read and stack.name == item_name then
+      if get_quality_name_from_item_stack(stack) == required then
+        count = count + stack.count
+      end
+    end
+  end
+  return count
+end
+
+local function remove_items_with_quality(inv, item_name, required_quality, to_remove)
+  if not inv or not inv.valid then return 0 end
+  local required = required_quality or "normal"
+  local remaining = to_remove
+
+  for i = 1, #inv do
+    if remaining <= 0 then break end
+    local stack = inv[i]
+    if stack and stack.valid_for_read and stack.name == item_name then
+      if get_quality_name_from_item_stack(stack) == required then
+        local take = math.min(stack.count, remaining)
+        stack.count = stack.count - take
+        remaining = remaining - take
+        if stack.count <= 0 then
+          stack.clear()
+        end
+      end
+    end
+  end
+
+  return to_remove - remaining
+end
+
 function try_build_ghost(player, info)
   for _, ghost_entity in pairs(info.ghost_entities) do
 
@@ -101,19 +166,31 @@ function try_build_ghost(player, info)
         if not inv or not inv.valid then return end
 
         local items = ghost_entity.ghost_prototype.items_to_place_this or {}
+        local required_quality = get_quality_name_from_ghost(ghost_entity)
 
         for _, wanted_stack in pairs(items) do
-          local stack = inv.find_item_stack(wanted_stack.name)
-          if stack and stack.valid_for_read and stack.count >= wanted_stack.count then
+          if count_items_with_quality(inv, wanted_stack.name, required_quality) >= wanted_stack.count then
+            -- Best-effort: capture health from a matching stack before removal.
+            local stack_for_health = nil
+            for i = 1, #inv do
+              local s = inv[i]
+              if s and s.valid_for_read and s.name == wanted_stack.name and get_quality_name_from_item_stack(s) == required_quality then
+                stack_for_health = s
+                break
+              end
+            end
+
             local collide, entity, request_proxy = ghost_entity.revive{raise_revive = true, return_item_request_proxy = true}
             if entity then
-              if stack.health ~= nil and stack.health < 1 and entity.health ~= nil and entity.max_health ~= nil then
-                entity.health = stack.health * entity.max_health
+              if stack_for_health and stack_for_health.valid_for_read and stack_for_health.health ~= nil and stack_for_health.health < 1 then
+                if entity.health ~= nil and entity.max_health ~= nil then
+                  entity.health = stack_for_health.health * entity.max_health
+                end
               end
             end
 
             if not ghost_entity.valid then
-              p.remove_item(wanted_stack)
+              remove_items_with_quality(inv, wanted_stack.name, required_quality, wanted_stack.count)
             end
             return
           end
@@ -384,7 +461,11 @@ function HelperFunctions.can_insert(player, entity)
         if product.type == "item" and (product.amount or product.amount_max)  then
           local count = math.floor(product.amount or product.amount_max)
           if count >= 1 then
-            if not player.can_insert { name = product.name, count = count } then
+            local insert_stack = { name = product.name, count = count }
+            if product.quality then
+              insert_stack.quality = product.quality
+            end
+            if not player.can_insert(insert_stack) then
               return false
             end
           end
