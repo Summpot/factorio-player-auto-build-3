@@ -11,6 +11,68 @@ local function ensure_storage_tables()
   storage.action_queue_index = storage.action_queue_index or {}
 end
 
+local function serialize_entity_ref(entity)
+  if not entity or not entity.valid then return nil end
+
+  local surface_index = (entity.surface and entity.surface.valid and entity.surface.index) or nil
+  if not surface_index then return nil end
+
+  local pos = entity.position or { x = 0, y = 0 }
+
+  local ref = {
+    surface_index = surface_index,
+    position = { x = pos.x, y = pos.y },
+    name = entity.name,
+    type = entity.type,
+  }
+
+  if entity.unit_number then
+    ref.unit_number = entity.unit_number
+  end
+
+  -- Disambiguate ghosts when multiple ghosts share the same prototype name.
+  if entity.name == "entity-ghost" or entity.name == "tile-ghost" or entity.type == "entity-ghost" or entity.type == "tile-ghost" then
+    if entity.ghost_name then
+      ref.ghost_name = entity.ghost_name
+    end
+  end
+
+  return ref
+end
+
+local function resolve_entity_from_ref(ref)
+  if not ref then return nil end
+  if not (ref.surface_index and ref.position) then return nil end
+
+  local surface = game and game.surfaces and game.surfaces[ref.surface_index]
+  if not surface then return nil end
+
+  local pos = ref.position
+  local area = {
+    left_top = { x = (pos.x or 0) - 0.1, y = (pos.y or 0) - 0.1 },
+    right_bottom = { x = (pos.x or 0) + 0.1, y = (pos.y or 0) + 0.1 },
+  }
+
+  local filter = { area = area, limit = 10 }
+  if ref.name then filter.name = ref.name end
+  if ref.type then filter.type = ref.type end
+
+  local candidates = surface.find_entities_filtered(filter)
+  for _, e in pairs(candidates) do
+    if e and e.valid then
+      if ref.ghost_name then
+        if e.ghost_name == ref.ghost_name then
+          return e
+        end
+      else
+        return e
+      end
+    end
+  end
+
+  return nil
+end
+
 local function get_entity_queue_key(entity)
   if not entity or not entity.valid then return nil end
 
@@ -29,9 +91,11 @@ local function clear_player_queue(player_index)
   storage.action_queue_index[player_index] = {}
 end
 
-local function enqueue_action(player_index, entity, action)
+local function enqueue_action(player_index, entity, action_type)
   ensure_storage_tables()
   if not entity or not entity.valid then return end
+
+  if not action_type then return end
 
   storage.action_queue[player_index] = storage.action_queue[player_index] or {}
   storage.action_queue_index[player_index] = storage.action_queue_index[player_index] or {}
@@ -40,8 +104,11 @@ local function enqueue_action(player_index, entity, action)
   if not key then return end
   if storage.action_queue_index[player_index][key] then return end
 
+  local entity_ref = serialize_entity_ref(entity)
+  if not entity_ref then return end
+
   storage.action_queue_index[player_index][key] = true
-  table.insert(storage.action_queue[player_index], {key = key, entity = entity, action = action})
+  table.insert(storage.action_queue[player_index], {key = key, entity = entity_ref, action = action_type})
 end
 
 local function dequeue_action_as_table(player_index, max_entries)
@@ -53,7 +120,7 @@ local function dequeue_action_as_table(player_index, max_entries)
   local removeIndices = {}
 
   for idx, entry in ipairs(queue) do
-    if entry and entry.entity and entry.entity.valid and entry.action then
+    if entry and entry.entity and entry.action and entry.key then
       table.insert(listOfActions, entry)
       table.insert(removeIndices, idx)
       max_entries = max_entries - 1
@@ -148,57 +215,70 @@ local function remove_items_with_quality(inv, item_name, required_quality, to_re
   return to_remove - remaining
 end
 
-function try_build_ghost(player, info)
-  for _, ghost_entity in pairs(info.ghost_entities) do
+local function try_build_ghost_entity(player, ghost_entity)
+  if not player or not player.valid then return end
+  if not ghost_entity or not ghost_entity.valid then return end
+  if not player.is_shortcut_toggled("toggle-player-auto-build") then return end
 
-    local skipDistanceCheck = player.character == nil
-    -- if no character just ignore range check
-    if(skipDistanceCheck or get_distance(player.position, ghost_entity.position) < info.ghost_search_range) then
+  local skipDistanceCheck = player.character == nil
+  local radius = (player.character and (player.character.build_distance + 30)) or 50
+  if not skipDistanceCheck then
+    if get_distance(player.position, ghost_entity.position) >= radius then
+      return
+    end
+  end
 
-      local player_index = player.index
-      enqueue_action(player_index, ghost_entity, function()
-        local p = game.get_player(player_index)
-        if not p or not p.valid then return end
-        if not p.is_shortcut_toggled("toggle-player-auto-build") then return end
-        if not ghost_entity or not ghost_entity.valid then return end
+  local inv = player.get_main_inventory()
+  if not inv or not inv.valid then return end
 
-        local inv = p.get_main_inventory()
-        if not inv or not inv.valid then return end
+  local ghost_prototype = ghost_entity.ghost_prototype
+  if not ghost_prototype then return end
 
-        local items = ghost_entity.ghost_prototype.items_to_place_this or {}
-        local required_quality = get_quality_name_from_ghost(ghost_entity)
+  local items = ghost_prototype.items_to_place_this or {}
+  local required_quality = get_quality_name_from_ghost(ghost_entity)
 
-        for _, wanted_stack in pairs(items) do
-          if count_items_with_quality(inv, wanted_stack.name, required_quality) >= wanted_stack.count then
-            -- Best-effort: capture health from a matching stack before removal.
-            local stack_for_health = nil
-            for i = 1, #inv do
-              local s = inv[i]
-              if s and s.valid_for_read and s.name == wanted_stack.name and get_quality_name_from_item_stack(s) == required_quality then
-                stack_for_health = s
-                break
-              end
-            end
+  for _, wanted_stack in pairs(items) do
+    if count_items_with_quality(inv, wanted_stack.name, required_quality) >= wanted_stack.count then
+      -- Best-effort: capture health from a matching stack before removal.
+      local stack_for_health = nil
+      for i = 1, #inv do
+        local s = inv[i]
+        if s and s.valid_for_read and s.name == wanted_stack.name and get_quality_name_from_item_stack(s) == required_quality then
+          stack_for_health = s
+          break
+        end
+      end
 
-            local collide, entity, request_proxy = ghost_entity.revive{raise_revive = true, return_item_request_proxy = true}
-            if entity then
-              if stack_for_health and stack_for_health.valid_for_read and stack_for_health.health ~= nil and stack_for_health.health < 1 then
-                if entity.health ~= nil and entity.max_health ~= nil then
-                  entity.health = stack_for_health.health * entity.max_health
-                end
-              end
-            end
-
-            if not ghost_entity.valid then
-              remove_items_with_quality(inv, wanted_stack.name, required_quality, wanted_stack.count)
-            end
-            return
+      local _, entity, _ = ghost_entity.revive { raise_revive = true, return_item_request_proxy = true }
+      if entity then
+        if stack_for_health and stack_for_health.valid_for_read and stack_for_health.health ~= nil and stack_for_health.health < 1 then
+          if entity.health ~= nil and entity.max_health ~= nil then
+            entity.health = stack_for_health.health * entity.max_health
           end
         end
-      end)
+      end
 
+      if not ghost_entity.valid then
+        remove_items_with_quality(inv, wanted_stack.name, required_quality, wanted_stack.count)
+      end
+      return
     end
+  end
+end
 
+function try_build_ghost(player, ghost_entities)
+  if not ghost_entities then return end
+
+  local skipDistanceCheck = player.character == nil
+  local radius = (player.character and (player.character.build_distance + 30)) or 50
+
+  for _, ghost_entity in pairs(ghost_entities) do
+    if ghost_entity and ghost_entity.valid then
+      -- if no character just ignore range check
+      if skipDistanceCheck or get_distance(player.position, ghost_entity.position) < radius then
+        enqueue_action(player.index, ghost_entity, "build_ghost")
+      end
+    end
   end
 end
 
@@ -210,30 +290,12 @@ function try_to_autodeconstruct(player, deconstructs)
                 if entity.to_be_deconstructed() then
                   
                   if entity.type == "deconstructible-tile-proxy" then
-                    local player_index = player.index
-                    enqueue_action(player_index, entity, function()
-                      local p = game.get_player(player_index)
-                      if not p or not p.valid then return end
-                      if not p.is_shortcut_toggled("toggle-player-auto-build") then return end
-                      try_mine_tile_if_space(p, entity)
-                    end)
+                    enqueue_action(player.index, entity, "mine_tile_proxy")
                   elseif (entity.prototype.mineable_properties and entity.prototype.mineable_properties.minable == true)  then
-                    local player_index = player.index
-                    enqueue_action(player_index, entity, function()
-                      local p = game.get_player(player_index)
-                      if not p or not p.valid then return end
-                      if not p.is_shortcut_toggled("toggle-player-auto-build") then return end
-                      try_mine_entity_if_space(p, entity)
-                    end)
+                    enqueue_action(player.index, entity, "mine_entity")
                   else
                     if entity.type == "cliff" then
-                      local player_index = player.index
-                      enqueue_action(player_index, entity, function()
-                        local p = game.get_player(player_index)
-                        if not p or not p.valid then return end
-                        if not p.is_shortcut_toggled("toggle-player-auto-build") then return end
-                        try_remove_and_destruct_entity(p, entity)
-                      end)
+                      enqueue_action(player.index, entity, "destroy_cliff")
                     end
                   end
               end
@@ -303,8 +365,19 @@ function tick_action_queue(player)
 
   local listOfActions = dequeue_action_as_table(player.index, 10)
   for _, entry in ipairs(listOfActions) do
-    if entry and entry.action then
-      entry.action()
+    if entry and entry.action and entry.entity then
+      local entity = resolve_entity_from_ref(entry.entity)
+      if entity and entity.valid then
+        if entry.action == "build_ghost" then
+          try_build_ghost_entity(player, entity)
+        elseif entry.action == "mine_tile_proxy" then
+          try_mine_tile_if_space(player, entity)
+        elseif entry.action == "mine_entity" then
+          try_mine_entity_if_space(player, entity)
+        elseif entry.action == "destroy_cliff" then
+          try_remove_and_destruct_entity(player, entity)
+        end
+      end
     end
   end
 
@@ -336,7 +409,6 @@ function tick_autobuild(player)
       character_position = position,
       ghost_search_range = radius,
       search_timer = 0,
-      ghost_entities = {},
     }
   end
 
@@ -359,10 +431,6 @@ function tick_autobuild(player)
       limit = 50
     })
 
-
-    
-    info.ghost_entities=ghosts
-
     local deconstructibles = player.surface.find_entities_filtered(
     {
       position = info.character_position,
@@ -372,7 +440,7 @@ function tick_autobuild(player)
       limit = 30
     })
 
-    try_build_ghost(player, info)
+    try_build_ghost(player, ghosts)
     try_to_autodeconstruct(player, deconstructibles)
   end
 end
@@ -411,6 +479,8 @@ script.on_event(defines.events.on_player_respawned, function(event)
 end)
 
 script.on_event(defines.events.on_game_created_from_scenario , function(event)
+
+  ensure_storage_tables()
 
   for index, _ in pairs(storage.player_info) do
       if storage.player_info[index] and storage.player_info[index].info then
