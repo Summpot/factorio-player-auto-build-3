@@ -15,9 +15,9 @@ data:extend(
     toggleable = true,
     icons = {
         {
-            icon = "__base__/graphics/icons/shortcut-toolbar/mip/toggle-personal-roboport-x56.png",
-            icon_size = 56,
-            scale = 0.5,
+            icon = "__base__/graphics/icons/shortcut-toolbar/mip/toggle-personal-roboport-x24.png",
+            icon_size = 24,
+            scale = 1,
             flags = {"gui-icon"}
         }
     },
@@ -25,16 +25,16 @@ data:extend(
         {
             icon = "__base__/graphics/icons/shortcut-toolbar/mip/toggle-personal-roboport-x24.png",
             icon_size = 24,
-            scale = 0.5,
+            scale = 1,
             flags = {"gui-icon"}
         }
     },
     disabled_icons = {
         {
-            icon = "__base__/graphics/icons/shortcut-toolbar/mip/toggle-personal-roboport-x56-white.png",
+            icon = "__base__/graphics/icons/shortcut-toolbar/mip/toggle-personal-roboport-x24-white.png",
             priority = "extra-high-no-scale",
-            icon_size = 56,
-            scale = 0.5,
+            icon_size = 24,
+            scale = 1,
             flags = {"gui-icon"}
         }
     },
@@ -43,7 +43,7 @@ data:extend(
             icon = "__base__/graphics/icons/shortcut-toolbar/mip/toggle-personal-roboport-x24-white.png",
             priority = "extra-high-no-scale",
             icon_size = 24,
-            scale = 0.5,
+            scale = 1,
             flags = {"gui-icon"}
         }
     }
